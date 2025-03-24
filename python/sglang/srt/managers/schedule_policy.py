@@ -74,7 +74,7 @@ class SchedulePolicy:
 
         # It is used to find the matching prefix for in-batch prefix caching.
         self.waiting_queue_radix_tree = RadixCache(
-            req_to_token_pool=None, token_to_kv_pool=None, disable=False
+            req_to_token_pool=None, token_to_kv_pool=None, radix_size=2**63 - 1, max_total_num_tokens=2**63 - 1, disable=False
         )
 
     def calc_priority(self, waiting_queue: List[Req]) -> bool:
@@ -311,9 +311,11 @@ class PrefillAdder:
         self.log_input_tokens += extend_input_len
 
     def add_being_chunked_req(self, req: Req):
+        # print(f"Being chunked: {req.rid}, extended: {req.extend_input_len}")
         truncated = req.extend_input_len > self.rem_chunk_tokens
         req.extend_input_len = min(req.extend_input_len, self.rem_chunk_tokens)
         req.fill_ids = req.fill_ids[: len(req.prefix_indices) + req.extend_input_len]
+        # print(f"Filled length: {len(req.fill_ids)}")
         self.can_run_list.append(req)
 
         self._prefill_one_req(
@@ -456,6 +458,7 @@ class PrefillAdder:
 
                 req.extend_input_len = trunc_len
                 req.fill_ids = req.fill_ids[: len(req.prefix_indices) + trunc_len]
+                # print(f"New_being_chunked: {req.rid}, chunked_size: {len(req.fill_ids)}, current_chunk: {trunc_len}")
                 self.can_run_list.append(req)
                 self.new_being_chunked_req = req
                 self.tree_cache.inc_lock_ref(req.last_node)

@@ -48,6 +48,7 @@ from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode, Forw
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import ServerArgs
+import inspect
 
 if TYPE_CHECKING:
     from sglang.srt.speculative.spec_info import SpecInfo, SpeculativeAlgorithm
@@ -270,6 +271,7 @@ class Req:
 
         # Chunked prefill
         self.is_being_chunked = 0
+        self.chunked_indices = []
 
         # For retraction
         self.is_retracted = False
@@ -329,6 +331,9 @@ class Req:
             self.prefix_indices, self.last_node = tree_cache.match_prefix(
                 rid=self.rid, key=self.adjust_max_prefix_ids()
             )
+        if len(self.chunked_indices) > len(self.prefix_indices):
+            # has not cached in radix tree
+            self.prefix_indices = self.chunked_indices
         self.extend_input_len = len(self.fill_ids) - len(self.prefix_indices)
 
     def adjust_max_prefix_ids(self):
@@ -620,6 +625,10 @@ class ScheduleBatch:
 
     def alloc_token_slots(self, num_tokens: int):
         out_cache_loc = self.token_to_kv_pool.alloc(num_tokens)
+
+        # caller = inspect.stack()[1]
+        # print(f"Allocate {num_tokens} called from {caller.filename}, line {caller.lineno}, in {caller.function}")
+
 
         if out_cache_loc is None:
             if self.tree_cache is not None:

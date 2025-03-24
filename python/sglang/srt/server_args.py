@@ -134,6 +134,7 @@ class ServerArgs:
     ds_sparse_decode_threshold: int = 4096
 
     # Optimization/debug options
+    radix_size: int = -1
     disable_radix_cache: bool = False
     disable_jump_forward: bool = False
     disable_cuda_graph: bool = False
@@ -732,6 +733,12 @@ class ServerArgs:
         )
 
         # Optimization/debug options
+        parser.add_argument(
+            "--radix-size",
+            type=int,
+            default=-1,
+            help="Size of Radix Cache"
+        )
         parser.add_argument(
             "--disable-radix-cache",
             action="store_true",

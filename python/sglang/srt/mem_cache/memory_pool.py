@@ -33,6 +33,8 @@ import torch
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.utils import debug_timing, get_compiler_backend
 
+import inspect
+
 logger = logging.getLogger(__name__)
 
 
@@ -63,6 +65,9 @@ class ReqToTokenPool:
         return len(self.free_slots)
 
     def alloc(self, need_size: int) -> List[int]:
+        # print(f"token alloc {need_size}")
+        # caller = inspect.stack()[1]
+        # print(f"Called from {caller.filename}, line {caller.lineno}, in {caller.function}")
         if need_size > len(self.free_slots):
             return None
 
@@ -73,8 +78,14 @@ class ReqToTokenPool:
 
     def free(self, free_index: Union[int, List[int]]):
         if isinstance(free_index, (int,)):
+            # print(f"token free {free_index}")
+            # caller = inspect.stack()[1]
+            # print(f"Called from {caller.filename}, line {caller.lineno}, in {caller.function}")
             self.free_slots.append(free_index)
         else:
+            # print(f"token free {len(free_index)}")
+            # caller = inspect.stack()[1]
+            # print(f"Called from {caller.filename}, line {caller.lineno}, in {caller.function}")
             self.free_slots.extend(free_index)
 
     def clear(self):
@@ -125,22 +136,33 @@ class BaseTokenToKVPool:
         return len(self.free_slots)
 
     def alloc(self, need_size: int):
+        # print(f"kv alloc {need_size}, before: {self.available_size()}")
+        # caller = inspect.stack()[1]
+        # print(f"Called from {caller.filename}, line {caller.lineno}, in {caller.function}")
         if need_size > len(self.free_slots):
             return None
 
         select_index = self.free_slots[:need_size]
         self.free_slots = self.free_slots[need_size:]
 
+        # print(f"kv after: {self.available_size()}")
+
         return select_index.to(self.device, non_blocking=True)
 
     def free(self, free_index: torch.Tensor):
+        # print(f"kv free {free_index.size()}, before: {self.available_size()}")
+        # caller = inspect.stack()[1]
+        # print(f"Called from {caller.filename}, line {caller.lineno}, in {caller.function}")
         if free_index.numel() == 0:
             return
 
         if self.is_not_in_free_group:
+            # print(f"free_index: {free_index}")
             self.free_slots = torch.concat((self.free_slots, free_index.cpu()))
         else:
+            # print(f"free_index group: {free_index}")
             self.free_group.append(free_index)
+        # print(f"kv after: {self.available_size()}")
 
     def free_group_begin(self):
         self.is_not_in_free_group = False

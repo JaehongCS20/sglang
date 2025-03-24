@@ -265,6 +265,8 @@ class Scheduler:
             self.tree_cache = RadixCache(
                 req_to_token_pool=self.req_to_token_pool,
                 token_to_kv_pool=self.token_to_kv_pool,
+                radix_size=server_args.radix_size,
+                max_total_num_tokens=self.max_total_num_tokens,
                 disable=server_args.disable_radix_cache,
             )
         self.tree_cache_metrics = {"total": 0, "hit": 0}
@@ -686,6 +688,8 @@ class Scheduler:
             self.token_to_kv_pool.available_size() + self.tree_cache.evictable_size()
         )
 
+        cache_used = self.tree_cache.total_size()
+
         logger.info(
             f"Prefill batch. "
             f"#new-seq: {len(can_run_list)}, "
@@ -693,6 +697,7 @@ class Scheduler:
             f"#cached-token: {adder.log_hit_tokens}, "
             f"cache hit rate: {100.0 * tree_cache_hit_rate:.2f}%, "
             f"token usage: {num_used / self.max_total_num_tokens:.2f}, "
+            f"cache usage: {cache_used / self.tree_cache.radix_size:.2f}, "
             f"#running-req: {running_bs}, "
             f"#queue-req: {len(self.waiting_queue) + has_being_chunked}"
         )
@@ -709,6 +714,7 @@ class Scheduler:
         num_used = self.max_total_num_tokens - (
             self.token_to_kv_pool.available_size() + self.tree_cache.evictable_size()
         )
+        cache_used = self.tree_cache.total_size()
         gen_throughput = self.num_generated_tokens / (
             time.time() - self.last_decode_stats_tic
         )
@@ -720,6 +726,7 @@ class Scheduler:
             f"#running-req: {num_running_reqs}, "
             f"#token: {num_used}, "
             f"token usage: {num_used / self.max_total_num_tokens:.2f}, "
+            f"cache usage: {cache_used / self.tree_cache.radix_size:.2f}, "
             f"gen throughput (token/s): {gen_throughput:.2f}, "
             f"#queue-req: {len(self.waiting_queue)}"
         )
@@ -763,6 +770,10 @@ class Scheduler:
                 self.last_batch.filter_batch(being_chunked_req=self.being_chunked_req)
                 self.tree_cache.cache_unfinished_req(self.being_chunked_req)
                 # being chunked request keeps its rid but will get a new req_pool_idx
+                # update chunked_indices
+                self.being_chunked_req.chunked_indices = self.req_to_token_pool.req_to_token[
+                    self.being_chunked_req.req_pool_idx, : len(self.being_chunked_req.fill_ids)
+                ]
                 self.req_to_token_pool.free(self.being_chunked_req.req_pool_idx)
                 self.batch_is_full = False
 
@@ -1147,6 +1158,9 @@ class Scheduler:
         self.stream_output(batch.reqs, batch.return_logprob)
 
         self.token_to_kv_pool.free_group_end()
+
+        # print(f"avail: {self.token_to_kv_pool.available_size()}, evictable: {self.tree_cache.evictable_size()}")
+        # self.check_memory()
 
         self.forward_ct_decode = (self.forward_ct_decode + 1) % (1 << 30)
         if (

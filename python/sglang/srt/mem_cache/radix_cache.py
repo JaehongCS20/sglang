@@ -23,6 +23,7 @@ import heapq
 import time
 from collections import defaultdict
 from typing import TYPE_CHECKING, Callable, List, Optional, Tuple
+import warnings
 
 import torch
 
@@ -60,10 +61,15 @@ class RadixCache(BasePrefixCache):
         self,
         req_to_token_pool: ReqToTokenPool,
         token_to_kv_pool: BaseTokenToKVPool,
+        radix_size: int,
+        max_total_num_tokens: int,
         disable: bool = False,
     ):
         self.req_to_token_pool = req_to_token_pool
         self.token_to_kv_pool = token_to_kv_pool
+        self.radix_size = radix_size
+        self.crash_on_leak = False
+        self.max_total_num_tokens = max_total_num_tokens
         self.disable = disable
         self.reset()
 
@@ -99,13 +105,14 @@ class RadixCache(BasePrefixCache):
             value = torch.tensor([], dtype=torch.int32)
         return value, last_node[0]
 
-    def insert(self, key: List, value=None):
+    def insert(self, key: List, value=None, isPrefill=True):
         if self.disable:
             return 0
 
         if value is None:
             value = [x for x in key]
-        return self._insert_helper(self.root_node, key, value)
+        # print(req)
+        return self._insert_helper(self.root_node, key, value, isPrefill)
 
     def cache_finished_req(self, req: Req, token_ids: Optional[List[int]] = None):
         """Cache request when it finishes."""
@@ -129,12 +136,29 @@ class RadixCache(BasePrefixCache):
         ]
 
         # Radix Cache takes one ref in memory pool
-        new_prefix_len = self.insert(token_ids, kv_indices.clone())
+        # print(f"key length: {len(token_ids)}")
+        new_prefix_len = self.insert(token_ids, kv_indices.clone(), False)
+        # print(f"Req info: {len(req.origin_input_ids)}, {len(req.output_ids)}")
+        # print(f"Freeing {len(req.prefix_indices)} to {new_prefix_len}")
+        # self.pretty_print()
         self.token_to_kv_pool.free(kv_indices[len(req.prefix_indices) : new_prefix_len])
 
         # Remove req slot release the cache lock
         self.req_to_token_pool.free(req.req_pool_idx)
         self.dec_lock_ref(req.last_node)
+
+        available_size = (
+            self.token_to_kv_pool.available_size() + self.evictable_size()
+        )
+        # print(f"avail: {self.token_to_kv_pool.available_size()}, evictable: {self.evictable_size()}")
+        # if available_size != self.max_total_num_tokens:
+        #     msg = (
+        #         "KV cache pool leak detected!"
+        #         f"{available_size=}, {self.max_total_num_tokens=}\n"
+        #     )
+        #     warnings.warn(msg)
+        #     if self.crash_on_leak:
+        #         raise ValueError(msg)
 
     def cache_unfinished_req(self, req: Req, token_ids: Optional[List[int]] = None):
         """Cache request when it is unfinished."""
@@ -149,12 +173,16 @@ class RadixCache(BasePrefixCache):
         ]
 
         # Radix Cache takes one ref in memory pool
-        new_prefix_len = self.insert(token_ids, kv_indices.clone())
+        # print(f"key length: {len(token_ids)}")
+        new_prefix_len = self.insert(token_ids, kv_indices.clone(), True)
+        # print(f"Req info: {len(req.origin_input_ids)}, {len(req.output_ids)}")
+        # print(f"Freeing {len(req.prefix_indices)} to {new_prefix_len}")
         self.token_to_kv_pool.free(kv_indices[len(req.prefix_indices) : new_prefix_len])
+        
 
         # The prefix indices could be updated, reuse it
         new_indices, new_last_node = self.match_prefix(token_ids)
-        assert len(new_indices) == len(token_ids)
+        # assert len(new_indices) == len(token_ids)
         self.req_to_token_pool.write(
             (req.req_pool_idx, slice(len(req.prefix_indices), len(new_indices))),
             new_indices[len(req.prefix_indices) :],
@@ -187,13 +215,14 @@ class RadixCache(BasePrefixCache):
                 break
             if x.lock_ref > 0:
                 continue
-
+            
             evict_callback(x.value)
             num_evicted += len(x.value)
             self._delete_leaf(x)
 
             if len(x.parent.children) == 0:
                 heapq.heappush(leaves, x.parent)
+        
 
     def inc_lock_ref(self, node: TreeNode):
         if self.disable:
@@ -259,7 +288,7 @@ class RadixCache(BasePrefixCache):
         new_node.parent.children[key[0]] = new_node
         return new_node
 
-    def _insert_helper(self, node: TreeNode, key: List, value):
+    def _insert_helper(self, node: TreeNode, key: List, value, isPrefill):
         node.last_access_time = time.time()
         if len(key) == 0:
             return 0
@@ -274,20 +303,41 @@ class RadixCache(BasePrefixCache):
                 else:
                     key = key[prefix_len:]
                     value = value[prefix_len:]
-                    return prefix_len + self._insert_helper(child, key, value)
+                    return prefix_len + self._insert_helper(child, key, value, isPrefill)
 
             new_node = self._split_node(child.key, child, prefix_len)
             return prefix_len + self._insert_helper(
-                new_node, key[prefix_len:], value[prefix_len:]
+                new_node, key[prefix_len:], value[prefix_len:], isPrefill
             )
 
         if len(key):
-            new_node = TreeNode()
-            new_node.parent = node
-            new_node.key = key
-            new_node.value = value
-            node.children[key[0]] = new_node
-            self.evictable_size_ += len(value)
+            if self.total_size() + len(key) > self.radix_size:
+                # evict 
+                num_tokens = self.total_size() + len(key) - self.radix_size
+                # print(f"Need evict: {num_tokens}")
+                # print(f"Before evict: {self.total_size()}")
+                self.evict(num_tokens, self.token_to_kv_pool.free)
+                # print(f"After evict: {self.total_size()}")
+            
+            if self.total_size() + len(key) <= self.radix_size:
+                # enough space
+                # print(f"Current size: {self.total_size()}")
+                new_node = TreeNode()
+                new_node.parent = node
+                new_node.key = key
+                new_node.value = value
+                node.children[key[0]] = new_node
+                self.evictable_size_ += len(value)
+                # print(f"Added size: {self.total_size()}")
+
+            else: # no space, free the cache
+                if not isPrefill:
+                    # print(f"decode: {len(key)}")
+                    return len(key)
+                else:
+                    # print(f"prefill: {len(key)}")
+                    return 0
+        # self.pretty_print()
         return 0
 
     def _print_helper(self, node: TreeNode, indent: int):
