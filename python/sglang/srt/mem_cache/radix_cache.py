@@ -67,6 +67,8 @@ class RadixCache(BasePrefixCache):
     ):
         self.req_to_token_pool = req_to_token_pool
         self.token_to_kv_pool = token_to_kv_pool
+        if radix_size < 0:
+           radix_size = max_total_num_tokens 
         self.radix_size = radix_size
         self.crash_on_leak = False
         self.max_total_num_tokens = max_total_num_tokens
